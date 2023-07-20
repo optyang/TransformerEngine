@@ -102,14 +102,18 @@ def _run_dot_product_attention(dtype, bs, config, backend, repetition_warmup, re
     time_backward = 0.0
     for i in range(repetition_benchmark):
         # forward pass
+        torch.cuda.synchronize()
         time_start = time.time()
         op = block(q, k, v)
+        torch.cuda.synchronize()
         time_end = time.time()
         time_forward += time_end - time_start
 
         # backward pass
+        torch.cuda.synchronize()
         time_start = time.time()
         op.backward(op_grad)
+        torch.cuda.synchronize()
         time_end = time.time()
         time_backward += time_end - time_start
 
