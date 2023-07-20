@@ -2,6 +2,7 @@
 #
 # See LICENSE for license information.
 
+import argparse
 import time
 import torch
 import pytest
@@ -14,53 +15,43 @@ from transformer_engine.pytorch import TransformerLayer
 from transformer_engine.pytorch.attention import DotProductAttention
 import os
 
+parser = argparse.ArgumentParser(description='benchmarking fMHA in Transformer Engine')
+parser.add_argument('--attn_mask_type', default='causal',
+                    choices=['causal', 'no_mask'])
+parser.add_argument('--batch_size', default=16, type=int)
+parser.add_argument('--num_attention_heads', default=16, type=int)
+parser.add_argument('--head_dim', default=64, type=int)
+parser.add_argument('--seq_len', default=128, type=int)
+parser.add_argument('--dropout_p', default=0.0, type=float)
+parser.add_argument('--repetition_warmup', default=0, type=int)
+parser.add_argument('--repetition_benchmark', default=1, type=int)
+
+
 class ModelConfig:
     def __init__(
-        self, num_layers, hidden_size, num_attention_heads, head_dim, seq_len,
+        self, num_attention_heads, head_dim, seq_len,
         dropout_p, attn_mask_type,
     ):
-        self.num_layers = num_layers
-        self.hidden_size = hidden_size
         self.num_attention_heads = num_attention_heads
         self.head_dim = head_dim
-        assert (hidden_size == num_attention_heads * head_dim
-                ), """hidden_size must be = num_heads x head_dim."""
         self.seq_len = seq_len
         self.dropout_p = dropout_p
         self.attn_mask_type  = attn_mask_type
 
-def benchmark_dot_product_attention(dtype, bs, config):
+def benchmark_dot_product_attention(dtype, bs, config, repetition_warmup, repetition_benchmark):
     """Test DotProductAttention module with three backends,
     FlashAttention, FusedAttention and UnfusedDotProductAttention"""
 
-    warm_up, repetitions = 10, 100
+    time_forward, time_backward = _run_dot_product_attention(dtype, bs, config, "FlashAttention", repetition_warmup, repetition_benchmark)
+    print(f"FlashAttention,  forward/backward time: {time_forward*1000:.2f}/{time_backward*1000:.2f} ms")
 
-    for _ in range(warm_up):
-        _, _ = _run_dot_product_attention(dtype, bs, config, "FlashAttention")
+    time_forward, time_backward = _run_dot_product_attention(dtype, bs, config, "FusedAttention", repetition_warmup, repetition_benchmark)
+    print(f"FusedAttention,  forward/backward time: {time_forward*1000:.2f}/{time_backward*1000:.2f} ms")
 
-    time_forward, time_backward = [0.0] * repetitions, [0.0] * repetitions
-    for i in range(repetitions):
-        time_forward[i], time_backward[i] = _run_dot_product_attention(dtype, bs, config, "FlashAttention")
-    print(f"FlashAttention,  forward/backward time: {sum(time_forward)/repetitions*1000:.2f}/{sum(time_backward)/repetitions*1000:.2f} ms")
+    time_forward, time_backward = _run_dot_product_attention(dtype, bs, config, "UnfusedDotProductAttention", repetition_warmup, repetition_benchmark)
+    print(f"UnfusedDotProductAttention,  forward/backward time: {time_forward*1000:.2f}/{time_backward*1000:.2f} ms")
 
-    for _ in range(warm_up):
-        _, _ = _run_dot_product_attention(dtype, bs, config, "FusedAttention")
-
-    time_forward, time_backward = [0.0] * repetitions, [0.0] * repetitions
-    for i in range(repetitions):
-        time_forward[i], time_backward[i] = _run_dot_product_attention(dtype, bs, config, "FusedAttention")
-    print(f"FusedAttention,  forward/backward time: {sum(time_forward)/repetitions*1000:.2f}/{sum(time_backward)/repetitions*1000:.2f} ms")
-
-    for _ in range(warm_up):
-        _, _ = _run_dot_product_attention(dtype, bs, config, "UnfusedDotProductAttention")
-
-    time_forward, time_backward = [0.0] * repetitions, [0.0] * repetitions
-    for i in range(repetitions):
-        time_forward[i], time_backward[i] = _run_dot_product_attention(dtype, bs, config, "UnfusedDotProductAttention")
-    print(f"UnfusedDotProductAttention,  forward/backward time: {sum(time_forward)/repetitions*1000:.2f}/{sum(time_backward)/repetitions*1000:.2f} ms")
-
-def _run_dot_product_attention(dtype, bs, config, backend):
-
+def _run_dot_product_attention(dtype, bs, config, backend, repetition_warmup, repetition_benchmark):
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -101,32 +92,40 @@ def _run_dot_product_attention(dtype, bs, config, backend):
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
 
-    time_forward_begin = time.time()
-    op = block(q, k, v)
-    time_forward_end = time.time()
+    # warm-up
+    for _ in range(repetition_warmup):
+        op = block(q, k, v)
+        op.backward(op_grad)
 
-    time_backward_begin = time.time()
-    op.backward(op_grad)
-    time_backward_end = time.time()
+    # benchmarking: repeat the same operation for repetition_benchmark times
+    time_forward = 0.0
+    time_backward = 0.0
+    for i in range(repetition_benchmark):
+        # forward pass
+        time_start = time.time()
+        op = block(q, k, v)
+        time_end = time.time()
+        time_forward += time_end - time_start
 
-    return time_forward_end-time_forward_begin, time_backward_end-time_backward_begin
+        # backward pass
+        time_start = time.time()
+        op.backward(op_grad)
+        time_end = time.time()
+        time_backward += time_end - time_start
+
+    # return the average forward and backward pass time
+    return time_forward/repetition_benchmark, time_backward/repetition_benchmark
 
 if __name__ == "__main__":
-    batch_size = 16
-    num_layers = 1
-    hidden_size = 1024
-    num_attention_heads = 16
-    head_dim = 64
-    seq_len = 128
-    dropout_p = 0.0
-    attn_mask_type = "causal"
-    model_config = ModelConfig(num_layers, hidden_size, num_attention_heads, head_dim, seq_len, dropout_p, attn_mask_type)
+    args = parser.parse_args()
+    model_config = ModelConfig(args.num_attention_heads, args.head_dim, args.seq_len, args.dropout_p, args.attn_mask_type)
 
     param_types = [torch.float16]
     if torch.cuda.is_bf16_supported():
         param_types.append(torch.bfloat16)
 
+    assert args.repetition_benchmark > 0, f"The number of repetitions in benchmark must be larger than 0 (but got {repetition_benchmark})."
     for dtype in param_types:
-        print(f"=========================dtype: {dtype}=========================")
-        benchmark_dot_product_attention(dtype, batch_size, model_config)
-        print("\n")
+        print(f"\n====={dtype}, {args.batch_size}-{args.seq_len}-{args.num_attention_heads}-{args.head_dim}, p={args.dropout_p}, {args.attn_mask_type}, repetition_warmup={args.repetition_warmup}, repetition_benchmark={args.repetition_benchmark}=========================")
+        benchmark_dot_product_attention(dtype, args.batch_size, model_config, args.repetition_warmup, args.repetition_benchmark)
+    print("\n")
