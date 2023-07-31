@@ -5,7 +5,6 @@
 import argparse
 import time
 import torch
-import pytest
 
 from transformer_engine.pytorch.utils import (
     init_method_normal,
@@ -43,13 +42,22 @@ def benchmark_dot_product_attention(dtype, bs, config, repetition_warmup, repeti
     FlashAttention, FusedAttention and UnfusedDotProductAttention"""
 
     time_forward, time_backward = _run_dot_product_attention(dtype, bs, config, "FlashAttention", repetition_warmup, repetition_benchmark)
-    print(f"FlashAttention,  forward/backward time: {time_forward*1000:.2f}/{time_backward*1000:.2f} ms")
+    if time_backward is not None:
+        print(f"FlashAttention,  forward/backward time: {time_forward:.2f}/{time_backward:.2f} ms")
+    else:
+        print(f"FlashAttention,  forward time: {time_forward:.2f} ms")
 
     time_forward, time_backward = _run_dot_product_attention(dtype, bs, config, "FusedAttention", repetition_warmup, repetition_benchmark)
-    print(f"FusedAttention,  forward/backward time: {time_forward*1000:.2f}/{time_backward*1000:.2f} ms")
+    if time_backward is not None:
+        print(f"FusedAttention,  forward/backward time: {time_forward:.2f}/{time_backward:.2f} ms")
+    else:
+        print(f"FusedAttention,  forward time: {time_forward:.2f} ms")
 
     time_forward, time_backward = _run_dot_product_attention(dtype, bs, config, "UnfusedDotProductAttention", repetition_warmup, repetition_benchmark)
-    print(f"UnfusedDotProductAttention,  forward/backward time: {time_forward*1000:.2f}/{time_backward*1000:.2f} ms")
+    if time_backward is not None:
+        print(f"UnfusedDotProductAttention,  forward/backward time: {time_forward:.2f}/{time_backward:.2f} ms")
+    else:
+        print(f"UnfusedDotProductAttention,  forward time: {time_forward:.2f} ms")
 
 def _run_dot_product_attention(dtype, bs, config, backend, repetition_warmup, repetition_benchmark):
     torch.manual_seed(1234)
@@ -72,6 +80,9 @@ def _run_dot_product_attention(dtype, bs, config, backend, repetition_warmup, re
     op_grad = 0.001 * torch.randint(0, 200, (
         config.seq_len, bs, config.num_attention_heads * config.head_dim
         ), dtype = dtype).cuda()
+    static_op_grad = 0.001 * torch.randint(0, 200, (
+        config.seq_len, bs, config.num_attention_heads * config.head_dim
+        ), dtype = dtype).cuda()
 
     block = (
          DotProductAttention(
@@ -92,33 +103,64 @@ def _run_dot_product_attention(dtype, bs, config, backend, repetition_warmup, re
     k = inp[:, :,1,:,:]
     v = inp[:, :,2,:,:]
 
-    # warm-up
-    for _ in range(repetition_warmup):
+    # block = torch.cuda.make_graphed_callables(block, (q, k, v))
+    # op = block(q, k, v)
+    # op.backward(op_grad)
+
+    time_forward = None
+    time_backward = None
+
+    s_forward = torch.cuda.Stream()
+    s_forward.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s_forward):
+        for _ in range(3):
+            op = block(q, k, v)
+    torch.cuda.current_stream().wait_stream(s_forward)
+
+    graph_forward = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph_forward):
         op = block(q, k, v)
-        op.backward(op_grad)
+
+    # warm up
+    for _ in range(repetition_warmup):
+        graph_forward.replay()
 
     # benchmarking: repeat the same operation for repetition_benchmark times
-    time_forward = 0.0
-    time_backward = 0.0
+    torch.cuda.synchronize()
+    time_start = time.time()
     for i in range(repetition_benchmark):
-        # forward pass
-        torch.cuda.synchronize()
-        time_start = time.time()
-        op = block(q, k, v)
-        torch.cuda.synchronize()
-        time_end = time.time()
-        time_forward += time_end - time_start
+        graph_forward.replay()
+    torch.cuda.synchronize()
+    time_end = time.time()
+    time_forward = (time_end - time_start) * 1000 / repetition_benchmark # in ms
 
-        # backward pass
-        torch.cuda.synchronize()
-        time_start = time.time()
-        op.backward(op_grad)
-        torch.cuda.synchronize()
-        time_end = time.time()
-        time_backward += time_end - time_start
+    # s_backward = torch.cuda.Stream()
+    # s_backward.wait_stream(torch.cuda.current_stream())
+    # with torch.cuda.stream(s_backward):
+    #     for _ in range(3):
+    #         op = block(q, k, v)
+    #         op.backward(op_grad)
+    # torch.cuda.current_stream().wait_stream(s_backward)
 
-    # return the average forward and backward pass time
-    return time_forward/repetition_benchmark, time_backward/repetition_benchmark
+    # graph_backward = torch.cuda.CUDAGraph()
+    # with torch.cuda.graph(graph_backward):
+    #         static_op = block(q, k, v)
+    #         static_op.backward(static_op_grad)
+
+    # # warm up
+    # for _ in range(repetition_warmup):
+    #     graph_backward.replay()
+
+    # # benchmarking: repeat the same operation for repetition_benchmark times
+    # torch.cuda.synchronize()
+    # time_start = time.time()
+    # for i in range(repetition_benchmark):
+    #     graph_backward.replay()
+    # torch.cuda.synchronize()
+    # time_end = time.time()
+    # time_backward = (time_end - time_start) * 1000 / repetition_benchmark # in ms
+
+    return time_forward, time_backward
 
 if __name__ == "__main__":
     args = parser.parse_args()
