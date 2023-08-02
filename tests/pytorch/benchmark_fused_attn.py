@@ -1,6 +1,6 @@
 '''
 In transformer_engine/tests/pytorch, run:
-python benchmark_fused_attn.py --batch_size=16 --num_attention_heads=32 --seq_len=512 --head_dim=64 --attn_mask_type="no_mask" --repetition_benchmark=100
+python benchmark_fused_attn.py --batch_size=16 --num_attention_heads=32 --seq_len=512 --head_dim=64 --attn_mask_type="no_mask" --repetition=100
 '''
 
 import argparse
@@ -24,7 +24,7 @@ parser.add_argument('--num_attention_heads', default=16, type=int)
 parser.add_argument('--head_dim', default=64, type=int)
 parser.add_argument('--seq_len', default=128, type=int)
 parser.add_argument('--dropout_p', default=0.0, type=float)
-parser.add_argument('--repetition_benchmark', default=1, type=int)
+parser.add_argument('--repetition', default=1, type=int)
 
 
 class ModelConfig:
@@ -38,29 +38,26 @@ class ModelConfig:
         self.dropout_p = dropout_p
         self.attn_mask_type  = attn_mask_type
 
-def benchmark_dot_product_attention(dtype, bs, config, repetition_benchmark):
+def benchmark_dot_product_attention(dtype, bs, config, repetition):
     """Test DotProductAttention module with three backends,
     FlashAttention, FusedAttention and UnfusedDotProductAttention"""
 
-    time_forward, time_backward = _run_dot_product_attention(dtype, bs, config, "FlashAttention", repetition_benchmark)
-    if time_forward is not None:
-        print(time_forward.timeit(repetition_benchmark))
-    if time_backward is not None:
-        print(time_backward.timeit(repetition_benchmark))
+    benchmark_forward, benchmark_backward = _run_dot_product_attention(dtype, bs, config, "FlashAttention", repetition)
+    time_forward = benchmark_forward.timeit(repetition)
+    time_backward = benchmark_backward.timeit(repetition)
+    print(f"FlashAttention: forward/backward {time_forward.mean*1e6:.2f}/{time_backward.mean*1e6:.2f} us")
 
-    time_forward, time_backward = _run_dot_product_attention(dtype, bs, config, "FusedAttention", repetition_benchmark)
-    if time_forward is not None:
-        print(time_forward.timeit(repetition_benchmark))
-    if time_backward is not None:
-        print(time_backward.timeit(repetition_benchmark))
+    benchmark_forward, benchmark_backward = _run_dot_product_attention(dtype, bs, config, "FusedAttention", repetition)
+    time_forward = benchmark_forward.timeit(repetition)
+    time_backward = benchmark_backward.timeit(repetition)
+    print(f"FusedAttention: forward/backward {time_forward.mean*1e6:.2f}/{time_backward.mean*1e6:.2f} us")
 
-    time_forward, time_backward = _run_dot_product_attention(dtype, bs, config, "UnfusedDotProductAttention", repetition_benchmark)
-    if time_forward is not None:
-        print(time_forward.timeit(repetition_benchmark))
-    if time_backward is not None:
-        print(time_backward.timeit(repetition_benchmark))
+    benchmark_forward, benchmark_backward = _run_dot_product_attention(dtype, bs, config, "UnfusedDotProductAttention", repetition)
+    time_forward = benchmark_forward.timeit(repetition)
+    time_backward = benchmark_backward.timeit(repetition)
+    print(f"UnfusedDotProductAttention: forward/backward {time_forward.mean*1e6:.2f}/{time_backward.mean*1e6:.2f} us")
 
-def _run_dot_product_attention(dtype, bs, config, backend, repetition_benchmark):
+def _run_dot_product_attention(dtype, bs, config, backend, repetition):
     torch.manual_seed(1234)
     torch.cuda.manual_seed(1234)
     os.environ["NVTE_FLASH_ATTN"] = "0"
@@ -115,7 +112,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, repetition_benchmark)
     with torch.cuda.graph(graph_forward):
         op = block(q, k, v)
 
-    time_forward = benchmark.Timer(
+    benchmark_forward = benchmark.Timer(
         stmt="graph.replay()",
         globals={
             "graph": graph_forward,
@@ -135,7 +132,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, repetition_benchmark)
     with torch.cuda.graph(graph_backward):
         op.backward(op_grad, retain_graph=True)
 
-    time_backward = benchmark.Timer(
+    benchmark_backward = benchmark.Timer(
         stmt="graph.replay()",
         globals={
             "graph": graph_backward,
@@ -144,7 +141,7 @@ def _run_dot_product_attention(dtype, bs, config, backend, repetition_benchmark)
         description="backward pass"
     )
 
-    return time_forward, time_backward
+    return benchmark_forward, benchmark_backward
 
 if __name__ == "__main__":
     args = parser.parse_args()
@@ -154,8 +151,8 @@ if __name__ == "__main__":
     if torch.cuda.is_bf16_supported():
         param_types.append(torch.bfloat16)
 
-    assert args.repetition_benchmark > 0, f"The number of repetitions in benchmark must be larger than 0 (but got {repetition_benchmark})."
+    assert args.repetition > 0, f"The number of repetitions in benchmark must be larger than 0 (but got {repetition})."
     for dtype in param_types:
-        print(f"\n====={dtype}, {args.batch_size}-{args.seq_len}-{args.num_attention_heads}-{args.head_dim}, p={args.dropout_p}, {args.attn_mask_type}, repetition_benchmark={args.repetition_benchmark}=========================")
-        benchmark_dot_product_attention(dtype, args.batch_size, model_config, args.repetition_benchmark)
+        print(f"\n====={dtype}, {args.batch_size}-{args.seq_len}-{args.num_attention_heads}-{args.head_dim}, p={args.dropout_p}, {args.attn_mask_type}, repetition={args.repetition}=========================")
+        benchmark_dot_product_attention(dtype, args.batch_size, model_config, args.repetition)
     print("\n")
