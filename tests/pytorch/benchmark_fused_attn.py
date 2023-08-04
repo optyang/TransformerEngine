@@ -17,15 +17,7 @@ from transformer_engine.pytorch.attention import DotProductAttention
 import os
 
 parser = argparse.ArgumentParser(description='benchmarking fMHA in Transformer Engine')
-parser.add_argument('--attn_mask_type', default='causal',
-                    choices=['causal', 'no_mask'])
-parser.add_argument('--batch_size', default=16, type=int)
-parser.add_argument('--num_attention_heads', default=16, type=int)
-parser.add_argument('--head_dim', default=64, type=int)
-parser.add_argument('--seq_len', default=128, type=int)
-parser.add_argument('--dropout_p', default=0.0, type=float)
 parser.add_argument('--repetition', default=1, type=int)
-
 
 class ModelConfig:
     def __init__(
@@ -45,12 +37,12 @@ def benchmark_dot_product_attention(dtype, bs, config, repetition):
     benchmark_forward, benchmark_backward = _run_dot_product_attention(dtype, bs, config, "FlashAttention", repetition)
     time_forward = benchmark_forward.timeit(repetition)
     time_backward = benchmark_backward.timeit(repetition)
-    print(f"FlashAttention: forward/backward {time_forward.mean*1e6:.2f}/{time_backward.mean*1e6:.2f} us")
+    print(f"            FlashAttention: forward/backward {time_forward.mean*1e6:.2f}/{time_backward.mean*1e6:.2f} us")
 
     benchmark_forward, benchmark_backward = _run_dot_product_attention(dtype, bs, config, "FusedAttention", repetition)
     time_forward = benchmark_forward.timeit(repetition)
     time_backward = benchmark_backward.timeit(repetition)
-    print(f"FusedAttention: forward/backward {time_forward.mean*1e6:.2f}/{time_backward.mean*1e6:.2f} us")
+    print(f"            FusedAttention: forward/backward {time_forward.mean*1e6:.2f}/{time_backward.mean*1e6:.2f} us")
 
     benchmark_forward, benchmark_backward = _run_dot_product_attention(dtype, bs, config, "UnfusedDotProductAttention", repetition)
     time_forward = benchmark_forward.timeit(repetition)
@@ -145,14 +137,30 @@ def _run_dot_product_attention(dtype, bs, config, backend, repetition):
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    model_config = ModelConfig(args.num_attention_heads, args.head_dim, args.seq_len, args.dropout_p, args.attn_mask_type)
-
-    param_types = [torch.float16]
-    if torch.cuda.is_bf16_supported():
-        param_types.append(torch.bfloat16)
-
     assert args.repetition > 0, f"The number of repetitions in benchmark must be larger than 0 (but got {repetition})."
-    for dtype in param_types:
-        print(f"\n====={dtype}, {args.batch_size}-{args.seq_len}-{args.num_attention_heads}-{args.head_dim}, p={args.dropout_p}, {args.attn_mask_type}, repetition={args.repetition}=========================")
-        benchmark_dot_product_attention(dtype, args.batch_size, model_config, args.repetition)
-    print("\n")
+
+    shapes = [ # (batch_size, seq_len, num_attention_heads, head_dim, dropout_p, attn_mask_type)
+        (1, 512, 32, 64, 0.0, "no_mask"),
+        (2, 512, 32, 64, 0.0, "no_mask"),
+        (4, 512, 32, 64, 0.0, "no_mask"),
+        (8, 512, 32, 64, 0.0, "no_mask"),
+        (16, 512, 32, 64, 0.0, "no_mask"),
+        (32, 512, 32, 64, 0.0, "no_mask"),
+        (64, 512, 32, 64, 0.0, "no_mask"),
+        (128, 512, 32, 64, 0.0, "no_mask"),
+        (256, 512, 32, 64, 0.0, "no_mask"),
+        (512, 512, 32, 64, 0.0, "no_mask"),
+        (1024, 512, 32, 64, 0.0, "no_mask"),
+        (2048, 512, 32, 64, 0.0, "no_mask"),
+    ]
+    for (batch_size, seq_len, num_attention_heads, head_dim, dropout_p, attn_mask_type) in shapes:
+        model_config = ModelConfig(num_attention_heads, head_dim, seq_len, dropout_p, attn_mask_type)
+
+        param_types = [torch.float16]
+        if torch.cuda.is_bf16_supported():
+            param_types.append(torch.bfloat16)
+
+        for dtype in param_types:
+            print(f"\n====={dtype}, {batch_size}-{seq_len}-{num_attention_heads}-{head_dim}, p={dropout_p}, {attn_mask_type}, repetition={args.repetition}=========================")
+            benchmark_dot_product_attention(dtype, batch_size, model_config, args.repetition)
+        print("\n")
